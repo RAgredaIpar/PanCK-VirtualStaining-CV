@@ -1,0 +1,20 @@
+# Entornos virtuales
+venv/
+.env
+
+# Datos y datasets
+data/
+processed_data/
+*.zip
+*.tar.gz
+
+# Modelos entrenados
+*.pth
+*.pkl
+*.h5
+models/checkpoint/
+
+# Resultados y logs
+results/
+runs/
+.ipynb_checkpoints/
