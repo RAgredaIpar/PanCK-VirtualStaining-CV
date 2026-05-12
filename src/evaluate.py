@@ -7,6 +7,7 @@ from skimage.metrics import structural_similarity as ssim
 from data_loader import IHC_Benchmarking_Dataset
 from models.pix2pix import UNetGenerator
 from models.unet import UNetSegmenter
+import os
 
 # --- 1. CONFIGURACIÓN ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -15,6 +16,9 @@ PATH_B = r"D:\job\TESIS\data\processed_data\train_B"
 M1_PATH = "../models/pix2pix_benchmarking.pth"
 M2_PATH = "../models/unet_benchmarking.pth"
 
+SAVE_DIR = r"D:\job\TESIS\results\figures"
+
+os.makedirs(SAVE_DIR, exist_ok=True)
 
 # --- 2. MÉTRICAS ---
 def dice_coeff(pred, target, threshold=0.5):
@@ -75,6 +79,21 @@ with torch.no_grad():
                 plt.imshow(display_list[j].cpu().permute(1, 2, 0) * 0.5 + 0.5)
                 plt.axis('off')
             plt.show()
+
+        if i < 10:
+            plt.figure(figsize=(16, 4))
+            display_list = [he[0], real_ihc[0], out1[0], out2[0]]
+            titles = ['H&E Original', 'IHC Real (GT)', 'Pix2Pix (M1)', 'U-Net (M2)']
+            for j in range(4):
+                plt.subplot(1, 4, j + 1)
+                plt.title(titles[j])
+                img = display_list[j].cpu().permute(1, 2, 0) * 0.5 + 0.5
+                plt.imshow(img)
+                plt.axis('off')
+
+            save_path = os.path.join(SAVE_DIR, f"sample_{i}.png")
+            plt.savefig(save_path, bbox_inches='tight')
+            plt.close()
 
 # --- 5. REPORTE DE RESULTADOS ---
 print("\n" + "=" * 40)
