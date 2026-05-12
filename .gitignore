@@ -4,7 +4,6 @@ venv/
 
 # Datos y datasets
 data/
-processed_data/
 *.zip
 *.tar.gz
 
@@ -12,8 +11,6 @@ processed_data/
 *.pth
 *.pkl
 *.h5
-models/checkpoint/
-
 # Resultados y logs
 results/
 runs/
