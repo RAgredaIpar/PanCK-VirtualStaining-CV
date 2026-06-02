@@ -11,7 +11,9 @@ data/
 *.pth
 *.pkl
 *.h5
+
 # Resultados y logs
 results/
 runs/
 .ipynb_checkpoints/
+wandb/

@@ -1,58 +1,106 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torchvision import transforms
 from data_loader import IHC_Benchmarking_Dataset
 from models.unet import UNetSegmenter
 import os
+import wandb  # Inyección de Weights & Biases
 
-# --- 1. CONFIGURACIÓN ---
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-PATH_A = r"D:\job\TESIS\data\processed_data\train_A"
-PATH_B = r"D:\job\TESIS\data\processed_data\train_B"
-SAVE_PATH = "../models/unet_benchmarking.pth"
-EPOCHS = 20
-BATCH_SIZE = 4
-LEARNING_RATE = 0.0001  # LR ligeramente menor para estabilidad en U-Net
 
-# --- 2. DATA PIPELINE ---
-transform = transforms.Compose([
-    transforms.Resize((256, 256)),
-    transforms.ToTensor(),
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-])
+def main():
+    # --- 1. CONFIGURACIÓN ---
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    PATH_A = r"D:\job\TESIS\data\processed_data\train_A"
+    PATH_B = r"D:\job\TESIS\data\processed_data\train_B"
+    SAVE_PATH = "../models/unet_benchmarking.pth"
+    EPOCHS = 100
+    BATCH_SIZE = 8
+    LEARNING_RATE = 0.0001
 
-dataset = IHC_Benchmarking_Dataset(PATH_A, PATH_B, transform=transform)
-dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+    # Inicializar experimento en WandB para el modelo propuesto
+    wandb.init(
+        project="Tesis-IHC-EsSalud",
+        name="M2-UNet-PRO",
+        config={
+            "learning_rate": LEARNING_RATE,
+            "epochs": EPOCHS,
+            "batch_size": BATCH_SIZE,
+            "architecture": "U-Net-PRO-Segmenter",
+            "loss_criterion": "MSE + 0.5 * L1"
+        }
+    )
 
-# --- 3. MODELO & OPTIMIZACIÓN ---
-model = UNetSegmenter().to(DEVICE)
-optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-criterion = nn.MSELoss()  # MSE para mejor definición de bordes estructurales
+    # --- 2. DATA PIPELINE ---
+    dataset = IHC_Benchmarking_Dataset(PATH_A, PATH_B, is_train=True)
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
 
-# --- 4. BUCLE DE ENTRENAMIENTO ---
-print(f"Iniciando entrenamiento del Modelo 2 (U-Net) en {DEVICE}...")
+    # --- 3. MODELO & OPTIMIZACIÓN ---
+    model = UNetSegmenter().to(DEVICE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-for epoch in range(EPOCHS):
-    epoch_loss = 0
-    model.train()
-    for real_A, real_B, _ in dataloader:
-        real_A, real_B = real_A.to(DEVICE), real_B.to(DEVICE)
+    criterion_mse = nn.MSELoss()
+    criterion_l1 = nn.L1Loss()
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    scaler = torch.amp.GradScaler('cuda')
 
-        # Forward
-        preds = model(real_A)
-        loss = criterion(preds, real_B)
+    # --- 4. BUCLE DE ENTRENAMIENTO ---
+    print(f"Iniciando entrenamiento PRO de U-Net en {DEVICE}...")
 
-        # Backward
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+    for epoch in range(EPOCHS):
+        epoch_loss = 0
+        model.train()
 
-        epoch_loss += loss.item()
+        for real_A, real_B, _ in dataloader:
+            real_A, real_B = real_A.to(DEVICE), real_B.to(DEVICE)
 
-    print(f"Epoch [{epoch + 1}/{EPOCHS}] - Loss MSE: {epoch_loss / len(dataloader):.4f}")
+            optimizer.zero_grad()
 
-# --- 5. GUARDADO ---
-os.makedirs("../models", exist_ok=True)
-torch.save(model.state_dict(), SAVE_PATH)
-print(f"Modelo guardado exitosamente en: {SAVE_PATH}")
+            with torch.amp.autocast('cuda'):
+                preds = model(real_A)
+                loss = criterion_mse(preds, real_B) + 0.5 * criterion_l1(preds, real_B)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
+            epoch_loss += loss.item()
+
+        scheduler.step()
+        current_lr = scheduler.get_last_lr()[0]
+        avg_loss = epoch_loss / len(dataloader)
+
+        print(f"Epoch [{epoch + 1}/{EPOCHS}] - Loss: {avg_loss:.4f} - LR: {current_lr:.6f}")
+
+        # Enviar métricas cuantitativas a la nube
+        wandb.log({
+            "epoch": epoch + 1,
+            "train/total_loss": avg_loss,
+            "train/learning_rate": current_lr
+        })
+
+        # Envío de muestras visuales a la nube cada 10 épocas para control de calidad
+        if (epoch + 1) % 10 == 0:
+            # Desnormalizar imágenes de [-1, 1] a rango estándar [0, 1] para visualización web
+            img_he = (real_A[0].detach().cpu().permute(1, 2, 0).numpy() * 0.5 + 0.5).clip(0, 1)
+            img_real_ihc = (real_B[0].detach().cpu().permute(1, 2, 0).numpy() * 0.5 + 0.5).clip(0, 1)
+            img_fake_ihc = (preds[0].detach().cpu().permute(1, 2, 0).numpy() * 0.5 + 0.5).clip(0, 1)
+
+            wandb.log({
+                "Visual_Progress/Muestra_Evolutiva": [
+                    wandb.Image(img_he, caption="H&E Entrada"),
+                    wandb.Image(img_real_ihc, caption="IHC Real (Ground Truth)"),
+                    wandb.Image(img_fake_ihc, caption="IHC Sintética (Predicción M2)")
+                ]
+            }, step=epoch + 1)
+
+    # --- 5. GUARDADO ---
+    os.makedirs("../models", exist_ok=True)
+    torch.save(model.state_dict(), SAVE_PATH)
+    print(f"Modelo U-Net optimizado guardado exitosamente en: {SAVE_PATH}")
+
+    # Cerrar el experimento de WandB limpiamente
+    wandb.finish()
+
+
+if __name__ == '__main__':
+    main()
