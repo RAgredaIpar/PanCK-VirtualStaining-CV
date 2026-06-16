@@ -2,70 +2,73 @@ import torch
 import torch.nn as nn
 
 
-class ResidualBlock(nn.Module):
-    def __init__(self, in_features):
-        super(ResidualBlock, self).__init__()
-        # Ingeniería inversa exacta de los índices de DeepLIIF
-        self.conv_block = nn.Sequential(
-            nn.Conv2d(in_features, in_features, 3, padding=1, padding_mode='reflect', bias=False),  # Índice 0
-            nn.BatchNorm2d(in_features),  # Índice 1
-            nn.ReLU(inplace=True),  # Índice 2
-            nn.Dropout(0.5),  # Índice 3 (Capa oculta sin pesos que desplaza el índice)
-            nn.Conv2d(in_features, in_features, 3, padding=1, padding_mode='reflect', bias=False),  # Índice 4
-            nn.BatchNorm2d(in_features)  # Índice 5
-        )
+class UnetSkipConnectionBlock(nn.Module):
+    """Bloque recursivo interno para construir la U-Net con Skip Connections"""
 
-    def forward(self, x):
-        return x + self.conv_block(x)
+    def __init__(self, outer_nc, inner_nc, input_nc=None,
+                 submodule=None, outermost=False, innermost=False, norm_layer=nn.BatchNorm2d, use_dropout=False):
+        super(UnetSkipConnectionBlock, self).__init__()
+        self.outermost = outermost
+        if input_nc is None:
+            input_nc = outer_nc
 
+        downconv = nn.Conv2d(input_nc, inner_nc, kernel_size=4, stride=2, padding=1, bias=False)
+        downrelu = nn.LeakyReLU(0.2, True)
+        downnorm = norm_layer(inner_nc)
+        uprelu = nn.ReLU(True)
+        upnorm = norm_layer(outer_nc)
 
-class DeepLIIFResNetGenerator(nn.Module):
-    def __init__(self, input_channels=3, output_channels=3, num_residual_blocks=9):
-        super(DeepLIIFResNetGenerator, self).__init__()
+        if outermost:
+            upconv = nn.ConvTranspose2d(inner_nc * 2, outer_nc, kernel_size=4, stride=2,
+                                        padding=1)  # bias=True por defecto
+            down = [downconv]
+            up = [uprelu, upconv, nn.Tanh()]
+            model = down + [submodule] + up
+        elif innermost:
+            upconv = nn.ConvTranspose2d(inner_nc, outer_nc, kernel_size=4, stride=2, padding=1, bias=False)
+            down = [downrelu, downconv]
+            up = [uprelu, upconv, upnorm]
+            model = down + up
+        else:
+            upconv = nn.ConvTranspose2d(inner_nc * 2, outer_nc, kernel_size=4, stride=2, padding=1, bias=False)
+            down = [downrelu, downconv, downnorm]
+            up = [uprelu, upconv, upnorm]
 
-        # Capa Inicial
-        model = [
-            nn.ReflectionPad2d(3),
-            nn.Conv2d(input_channels, 64, 7, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True)
-        ]
-
-        # Downsampling
-        in_features = 64
-        out_features = in_features * 2
-        for _ in range(2):
-            model += [
-                nn.Conv2d(in_features, out_features, 3, stride=2, padding=1, bias=False),
-                nn.BatchNorm2d(out_features),
-                nn.ReLU(inplace=True)
-            ]
-            in_features = out_features
-            out_features = in_features * 2
-
-        # Bloques Residuales (Ahora con la estructura exacta)
-        for _ in range(num_residual_blocks):
-            model += [ResidualBlock(in_features)]
-
-        # Upsampling
-        out_features = in_features // 2
-        for _ in range(2):
-            model += [
-                nn.ConvTranspose2d(in_features, out_features, 3, stride=2, padding=1, output_padding=1, bias=False),
-                nn.BatchNorm2d(out_features),
-                nn.ReLU(inplace=True)
-            ]
-            in_features = out_features
-            out_features = in_features // 2
-
-        # Capa de Salida
-        model += [
-            nn.ReflectionPad2d(3),
-            nn.Conv2d(64, output_channels, 7),
-            nn.Tanh()
-        ]
+            if use_dropout:
+                model = down + [submodule] + up + [nn.Dropout(0.5)]
+            else:
+                model = down + [submodule] + up
 
         self.model = nn.Sequential(*model)
 
     def forward(self, x):
-        return self.model(x)
+        if self.outermost:
+            return self.model(x)
+        else:
+            return torch.cat([x, self.model(x)], 1)
+
+
+class DeepLIIFNet(nn.Module):
+    """Clase principal que mapea exactamente las 94 capas del segmentador G51"""
+
+    def __init__(self, input_nc=3, output_nc=3, num_downs=9, ngf=64):
+        super(DeepLIIFNet, self).__init__()
+
+        # Construcción recursiva de la U-Net (Profundidad 9 para parches de 512x512)
+        unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=None, innermost=True)
+
+        # Capas intermedias profundas
+        for i in range(num_downs - 5):
+            unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=unet_block,
+                                                 use_dropout=False)
+
+        # Canales ascendentes/descendentes progresivos
+        unet_block = UnetSkipConnectionBlock(ngf * 4, ngf * 8, input_nc=None, submodule=unet_block)
+        unet_block = UnetSkipConnectionBlock(ngf * 2, ngf * 4, input_nc=None, submodule=unet_block)
+        unet_block = UnetSkipConnectionBlock(ngf, ngf * 2, input_nc=None, submodule=unet_block)
+
+        # Capa externa final
+        self.model = UnetSkipConnectionBlock(output_nc, ngf, input_nc=input_nc, submodule=unet_block, outermost=True)
+
+    def forward(self, input):
+        return self.model(input)

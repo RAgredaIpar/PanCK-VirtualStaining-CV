@@ -17,7 +17,7 @@ PATH_B = r"D:\job\TESIS\data\processed_data\train_B"
 
 M1_PATH = "../models/pix2pix_benchmarking.pth"
 M2_PATH = "../models/unet_benchmarking.pth"
-M3_PATH = "../models/deepliif_official.pth"
+M3_PATH = "../models/deepliif_segmenter.pth"
 
 
 def dice_coeff(pred, target, threshold=0.5):
