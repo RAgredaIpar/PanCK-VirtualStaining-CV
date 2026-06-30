@@ -127,6 +127,81 @@ class InferencePipeline:
 
         return results
 
+    def generate_score_cam(self, img_path):
+        """
+        MÓDULO DE IA EXPLICABLE (XAI):
+        Intercepta los mapas de activación de la capa convolucional profunda
+        de la U-Net PRO, generando un mapa de calor interactivo (JET)
+        superpuesto a la lámina H&E original.
+        """
+        if not os.path.exists(img_path):
+            raise FileNotFoundError(f"No existe la imagen en: {img_path}")
+
+        # 1. Preparar la imagen H&E original en formato BGR para el blending con OpenCV
+        img_pil = Image.open(img_path).convert("RGB")
+        img_bgr = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+        img_bgr = cv2.resize(img_bgr, (512, 512))
+
+        # 2. Convertir y pasar el clon de la imagen a la GPU
+        img_tensor = self.transform(img_pil).unsqueeze(0).to(self.device)
+
+        # 3. Registro automatizado del Forward Hook en la última Conv2d del modelo
+        target_layer = None
+        for name, module in self.unet_pro.named_modules():
+            if isinstance(module, torch.nn.Conv2d):
+                target_layer = module  # Captura la capa convolucional más profunda
+
+        if target_layer is None:
+            # Fallback de seguridad por si la estructura está empaquetada
+            target_layer = list(self.unet_pro.children())[-1]
+
+        # Contenedor para extraer las matrices ocultas
+        features = []
+
+        def hook_fn(module, input, output):
+            features.append(output)
+
+        # Enganchar el anzuelo en la capa
+        hook_handle = target_layer.register_forward_hook(hook_fn)
+
+        # Ejecutar una inferencia rápida y limpia sin cálculo de gradientes
+        with torch.no_grad():
+            _ = self.unet_pro(img_tensor)
+
+        # Retirar el hook de la memoria RAM/VRAM inmediatamente
+        hook_handle.remove()
+
+        if len(features) == 0:
+            raise RuntimeError("[-] Fallo crítico: No se pudieron capturar las activaciones convolucionales.")
+
+        # 4. Procesar el mapa de características extraído [Cannels, Height, Width]
+        feature_map = features[0].squeeze(0).cpu().numpy()
+
+        # Tomar el promedio a través del canal de dimensiones para colapsar la atención (CAM)
+        heatmap = np.mean(feature_map, axis=0)
+
+        # Relu matemático: Conservar solo las activaciones que aportaron positivamente
+        heatmap = np.maximum(heatmap, 0)
+
+        # Normalización matemática Min-Max [0, 255]
+        if np.max(heatmap) != 0:
+            heatmap = heatmap / np.max(heatmap)
+        heatmap = np.uint8(255 * heatmap)
+
+        # Redimensionar el mapa de activación al tamaño clínico estándar (512x512)
+        heatmap = cv2.resize(heatmap, (512, 512))
+
+        # 5. Aplicar el mapa de color COLORMAP_JET (Azul = Frío/Tejido Sano, Rojo = Caliente/Atención IA)
+        heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+
+        # 6. Fusión Óptica (Blending): 60% la imagen H&E original y 40% el mapa de calor
+        alpha = 0.6
+        beta = 0.4
+        overlay = cv2.addWeighted(img_bgr, alpha, heatmap_color, beta, 0)
+
+        # Devolver la matriz limpia convertida a RGB lista para que el backend la haga Base64
+        return cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+
 
 if __name__ == "__main__":
     RUTA_TEST = r"D:\job\TESIS\data\processed_data\train_A\18_1.png"
@@ -147,6 +222,9 @@ if __name__ == "__main__":
         print(f"[+] ÍNDICE DE POSITIVIDAD CLINICO PAN-CK  : {report['positivity_index']}%")
         print("=" * 40)
         print("[+] Matriz de auditoría visual generada correctamente en memoria.")
+        heatmap_rgb = pipeline.generate_score_cam(RUTA_TEST)
+        print(f"[+] Mapa de calor Score-CAM generado con éxito. Dimensiones: {heatmap_rgb.shape}")
+        print("=" * 40)
 
     except Exception as e:
         print(f"[-] Error durante la ejecución del motor analítico: {e}")

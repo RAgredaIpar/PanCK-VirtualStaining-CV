@@ -17,3 +17,6 @@ results/
 runs/
 .ipynb_checkpoints/
 wandb/
+static/
+outputs/
+uploads/

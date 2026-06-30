@@ -1,6 +1,8 @@
 import os
 import uuid
 import shutil
+import io
+import base64
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,7 +17,7 @@ app = FastAPI(
     description="Backend de IA para la síntesis cromática e inmunohistoquímica automatizada."
 )
 
-# Configurar CORS para que tu frontend en Next.js (ej. http://localhost:3000) pueda conectarse sin bloqueos
+# Configurar CORS para que tu frontend en Next.js pueda conectarse sin bloqueos
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # En producción cambia esto por la URL de tu Next.js
@@ -33,7 +35,7 @@ OUTPUT_DIR = os.path.join(STATIC_DIR, "outputs")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Montar la carpeta estática para que los archivos sean accesibles por HTTP (ej. http://localhost:8000/static/...)
+# Montar la carpeta estática para respaldos físicos
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 # Inicializar el pipeline (carga los modelos a la GPU una sola vez al encender el servidor)
@@ -41,14 +43,11 @@ print("[+] Inicializando Pipeline de Inteligencia Artificial en el Backend...")
 pipeline = InferencePipeline()
 
 
-import io
-import base64
-
 @app.post("/api/quantify")
 async def quantify_tissue(file: UploadFile = File(...)):
     """
     ENDPOINT CLÍNICO OPTIMIZADO: Devuelve las imágenes codificadas en Base64
-    para evadir de forma definitiva los bloqueos de contenido mixto y advertencias de Ngrok.
+    e incluye el mapa de interpretabilidad Score-CAM (IA Explicable).
     """
     if not file.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff')):
         raise HTTPException(status_code=400, detail="Formato de archivo no soportado.")
@@ -60,13 +59,18 @@ async def quantify_tissue(file: UploadFile = File(...)):
         with open(temp_input_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Inferencia en GPU
+        # 1. Inferencia base en GPU y Motor Analítico HSV
         he_t, fake_ihc_t, mask_t = pipeline.run_inference(temp_input_path)
         report = pipeline.analyze_cells(fake_ihc_t, mask_t)
 
+        # 2. NUEVO: Ejecutar el módulo de IA Explicable (Score-CAM)
+        heatmap_rgb = pipeline.generate_score_cam(temp_input_path)
+
+        # 3. Convertir tensores y matrices a objetos de imagen PIL
         fake_ihc_rgb = pipeline.denormalize_to_numpy(fake_ihc_t)
         fake_ihc_img = Image.fromarray(fake_ihc_rgb)
         audit_img = Image.fromarray(report["audit_image_rgb"])
+        heatmap_img = Image.fromarray(heatmap_rgb)  # <-- Nueva imagen PIL para el mapa de calor
 
         # --- TRUCO INGENIERIL: CONVERSIÓN A BASE64 EN MEMORIA ---
         def convert_to_base64(pil_image):
@@ -77,10 +81,12 @@ async def quantify_tissue(file: UploadFile = File(...)):
 
         base64_ihc = convert_to_base64(fake_ihc_img)
         base64_audit = convert_to_base64(audit_img)
+        base64_heatmap = convert_to_base64(heatmap_img)  # <-- Codificación Base64 de la atención de la IA
 
-        # Guardado local de respaldo para auditoría física de archivos
+        # 4. Guardado local de respaldo para auditoría física de archivos e historial
         fake_ihc_img.save(os.path.join(OUTPUT_DIR, f"fake_ihc_{request_id}.png"))
         audit_img.save(os.path.join(OUTPUT_DIR, f"audit_{request_id}.png"))
+        heatmap_img.save(os.path.join(OUTPUT_DIR, f"heatmap_{request_id}.png"))  # <-- Respaldo físico del mapa
 
         pos_idx = report["positivity_index"]
         if pos_idx < 15.0:
@@ -96,6 +102,7 @@ async def quantify_tissue(file: UploadFile = File(...)):
             risk_color = "#EF4444"
             risk_desc = "Alta densidad celular inmunopositiva detectada. Sugiere invasión tumoral activa masiva."
 
+        # 5. Retornar Payload ampliado incluyendo Score-CAM
         return {
             "status": "success",
             "metadata": {
@@ -114,8 +121,9 @@ async def quantify_tissue(file: UploadFile = File(...)):
                 "description": risk_desc
             },
             "visual_payloads": {
-                "synthetic_ihc_url": base64_ihc,  # <-- Ahora viaja la imagen incrustada aquí
-                "audit_canvas_url": base64_audit   # <-- Ahora viaja la imagen incrustada aquí
+                "synthetic_ihc_url": base64_ihc,
+                "audit_canvas_url": base64_audit,
+                "score_cam_url": base64_heatmap  # <-- AQUÍ ENVIAMOS EL MAPA DE CALOR A NEXT.JS
             }
         }
 
